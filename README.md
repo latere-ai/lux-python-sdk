@@ -9,7 +9,7 @@ keys, verbatim.
 ## Install
 
 ```
-pip install git+https://github.com/latere-ai/lux-python-sdk
+pip install luxsdk
 ```
 
 ```python
