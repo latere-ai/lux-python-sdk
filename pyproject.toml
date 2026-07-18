@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "luxsdk"
+version = "0.1.0"
+description = "Python client for the Latere Lux gateway's native dialect (POST /lux/v1/generate)"
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.setuptools.packages.find]
+include = ["luxsdk*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
