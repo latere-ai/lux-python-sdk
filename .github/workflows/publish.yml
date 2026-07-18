@@ -1,0 +1,22 @@
+# Publishes luxsdk to PyPI on a version tag (v0.1.0 → 0.1.0) via
+# trusted publishing (OIDC): no token lives anywhere. PyPI must list
+# this repo + workflow as a (pending) trusted publisher for "luxsdk".
+name: publish
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install build pytest && python -m pytest tests/ -q
+      - run: python -m build
+      - uses: pypa/gh-action-pypi-publish@release/v1
