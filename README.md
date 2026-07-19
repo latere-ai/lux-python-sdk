@@ -2,7 +2,7 @@
 
 The Python client for [Latere Lux](https://lux.latere.ai)'s native
 dialect: one request/response/stream shape for every model Lux routes.
-Standard library only — no dependencies to install alongside it.
+Standard library only. No dependencies to install alongside it.
 Messages, blocks, and events are dicts with the wire's snake_case
 keys, verbatim.
 
