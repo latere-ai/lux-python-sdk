@@ -41,6 +41,7 @@ class _Handler(BaseHTTPRequestHandler):
         _Handler.last = {
             "path": self.path,
             "auth": self.headers.get("Authorization", ""),
+            "cost_tag": self.headers.get("Lux-Cost-Tag"),
             "body": json.loads(self.rfile.read(length) or b"{}"),
         }
         _Handler.respond(self)
@@ -135,6 +136,38 @@ def test_generate_opaque_error(server):
     assert exc.value.status == 502
     assert exc.value.code == ""
     assert "upstream fell over" in exc.value.message
+
+
+def test_cost_tags_serialized_and_sorted(server):
+    _Handler.respond = lambda h: _json_response(h, payload=OK_RESPONSE)
+    c = luxsdk.Client(server)
+    # Insertion order (tenant, project) differs from sorted order to
+    # prove the header is sorted, not just echoed.
+    c.generate(
+        model="m",
+        messages=[luxsdk.user_text("x")],
+        cost_tags={"tenant": "acme", "project": "web"},
+    )
+    assert _Handler.last["cost_tag"] == "project=web,tenant=acme"
+
+
+def test_cost_tags_absent_when_unset(server):
+    _Handler.respond = lambda h: _json_response(h, payload=OK_RESPONSE)
+    luxsdk.Client(server).generate(model="m", messages=[luxsdk.user_text("x")])
+    assert _Handler.last["cost_tag"] is None
+
+
+def test_cost_tags_client_default_and_per_call_override(server):
+    _Handler.respond = lambda h: _json_response(h, payload=OK_RESPONSE)
+    c = luxsdk.Client(server, cost_tags={"tenant": "default"})
+    c.generate(model="m", messages=[luxsdk.user_text("x")])
+    assert _Handler.last["cost_tag"] == "tenant=default"
+    # A per-call value wins over the client default.
+    c.generate(model="m", messages=[luxsdk.user_text("x")], cost_tags={"tenant": "acme"})
+    assert _Handler.last["cost_tag"] == "tenant=acme"
+    # A pre-formatted string passes through unchanged.
+    c.generate(model="m", messages=[luxsdk.user_text("x")], cost_tags="tenant=raw,zone=eu")
+    assert _Handler.last["cost_tag"] == "tenant=raw,zone=eu"
 
 
 def test_token_source_wins(server):

@@ -59,6 +59,27 @@ tc = c.count_tokens(model="claude-sonnet-5", messages=[luxsdk.user_text("Hi")])
 zero-argument callable supplying a per-call bearer (e.g. a rotating
 JWT) and wins over `api_key`.
 
+## Cost attribution
+
+`cost_tags` attributes a call's cost to named dimensions within your
+own spend, sent as the `Lux-Cost-Tag` header. It never changes who is
+billed or what the key can reach. Pass a `dict` (serialized to sorted
+`key=value` pairs) or a pre-formatted string:
+
+```python
+c = luxsdk.Client("https://lux.latere.ai", api_key=key, cost_tags={"tenant": "acme"})
+
+# Per call; overrides the client default.
+res = c.generate(
+    model="claude-sonnet-5",
+    messages=[luxsdk.user_text("Hi")],
+    cost_tags={"tenant": "acme", "project": "web"},  # sent as project=web,tenant=acme
+)
+```
+
+The gateway validates the value and rejects a malformed one with a
+`400`; the SDK passes it through untouched.
+
 ## Errors and loss
 
 Non-2xx responses raise `luxsdk.Error` with `status`, `code`,

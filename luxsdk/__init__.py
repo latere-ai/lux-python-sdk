@@ -38,6 +38,18 @@ _GENERATE_PATH = "/lux/v1/generate"
 _COUNT_TOKENS_PATH = "/lux/v1/count_tokens"
 _LOSS_HEADER = "X-Lux-Compat-Loss"
 _ESTIMATED_HEADER = "X-Lux-Compat-Estimated"
+_COST_TAG_HEADER = "Lux-Cost-Tag"
+
+
+def _format_cost_tags(tags: "dict[str, str] | str | None") -> str:
+    """Serialize cost tags to the ``Lux-Cost-Tag`` wire form: sorted
+    ``key=value`` pairs joined by commas, no spaces. A pre-formatted
+    string passes through unchanged; an empty/None value yields ""."""
+    if not tags:
+        return ""
+    if isinstance(tags, str):
+        return tags
+    return ",".join(f"{k}={tags[k]}" for k in sorted(tags))
 
 _VALID_EVENTS = {
     "message_start",
@@ -186,6 +198,10 @@ class Client:
     ``api_key`` is a static bearer (a Lux virtual key). ``token_source``
     supplies a per-call bearer (e.g. a rotating JWT) and wins over
     ``api_key``.
+
+    ``cost_tags`` attributes every call's cost to named dimensions
+    within the caller's own spend (e.g. ``{"tenant": "acme"}``); a
+    per-call ``cost_tags`` overrides this default.
     """
 
     def __init__(
@@ -194,16 +210,20 @@ class Client:
         *,
         api_key: str = "",
         token_source: Callable[[], str] | None = None,
+        cost_tags: "dict[str, str] | str | None" = None,
         opener: Any = None,
     ):
         self._base = base_url.rstrip("/")
         self._api_key = api_key
         self._token_source = token_source
+        self._cost_tags = cost_tags
         self._opener = opener or urllib.request.build_opener()
 
-    def generate(self, **request: Any) -> Result:
+    def generate(
+        self, *, cost_tags: "dict[str, str] | str | None" = None, **request: Any
+    ) -> Result:
         """Non-streaming call; the stream flag is overridden off."""
-        resp = self._post(_GENERATE_PATH, {**request, "stream": False})
+        resp = self._post(_GENERATE_PATH, {**request, "stream": False}, cost_tags)
         with resp:
             body = json.loads(resp.read())
             return Result(
@@ -216,9 +236,11 @@ class Client:
                 loss=_parse_loss(resp),
             )
 
-    def count_tokens(self, **request: Any) -> TokenCount:
+    def count_tokens(
+        self, *, cost_tags: "dict[str, str] | str | None" = None, **request: Any
+    ) -> TokenCount:
         """Token count without spending output tokens; no spend gates run."""
-        resp = self._post(_COUNT_TOKENS_PATH, {**request, "stream": False})
+        resp = self._post(_COUNT_TOKENS_PATH, {**request, "stream": False}, cost_tags)
         with resp:
             body = json.loads(resp.read())
             return TokenCount(
@@ -226,20 +248,31 @@ class Client:
                 estimated=resp.headers.get(_ESTIMATED_HEADER) == "true",
             )
 
-    def stream(self, **request: Any) -> Stream:
+    def stream(
+        self, *, cost_tags: "dict[str, str] | str | None" = None, **request: Any
+    ) -> Stream:
         """Streaming call; the stream flag is overridden on."""
-        resp = self._post(_GENERATE_PATH, {**request, "stream": True})
+        resp = self._post(_GENERATE_PATH, {**request, "stream": True}, cost_tags)
         ctype = resp.headers.get("Content-Type", "")
         if not ctype.startswith("text/event-stream"):
             resp.close()
             raise Error(resp.status, "", f"expected an event stream, got {ctype!r}")
         return Stream(resp, _parse_loss(resp))
 
-    def _post(self, path: str, payload: dict[str, Any]) -> Any:
+    def _post(
+        self,
+        path: str,
+        payload: dict[str, Any],
+        cost_tags: "dict[str, str] | str | None" = None,
+    ) -> Any:
         headers = {"Content-Type": "application/json"}
         bearer = self._token_source() if self._token_source else self._api_key
         if bearer:
             headers["Authorization"] = f"Bearer {bearer}"
+        tags = cost_tags if cost_tags is not None else self._cost_tags
+        formatted = _format_cost_tags(tags)
+        if formatted:
+            headers[_COST_TAG_HEADER] = formatted
         req = urllib.request.Request(
             self._base + path,
             data=json.dumps(payload).encode("utf-8"),
