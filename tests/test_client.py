@@ -255,3 +255,59 @@ def test_stream_error_status(server):
     with pytest.raises(luxsdk.Error) as exc:
         luxsdk.Client(server).stream(model="m", messages=[luxsdk.user_text("x")])
     assert exc.value.status == 403
+
+
+# The load-bearing compatibility property of the environment fallback is
+# that it fills only what the caller left unset. Every existing call site
+# passes an explicit base and credential, so if the environment could
+# override either, exporting LUX_BASE_URL in a shell would silently
+# redirect programs that never opted in.
+@pytest.mark.parametrize(
+    "env_base,env_key,arg_base,kwargs,want_base,want_key",
+    [
+        # explicit beats env, on both fields
+        (
+            "https://env.example",
+            "lux_from_env",
+            "https://arg.example",
+            {"api_key": "lux_from_arg"},
+            "https://arg.example",
+            "lux_from_arg",
+        ),
+        # env fills what was omitted
+        (
+            "https://env.example",
+            "lux_from_env",
+            "",
+            {},
+            "https://env.example",
+            "lux_from_env",
+        ),
+        # the public default fills an unset base
+        ("", "lux_from_env", "", {}, luxsdk.DEFAULT_BASE_URL, "lux_from_env"),
+        # an unset credential stays unset: defaulting to unauthenticated
+        # would turn a misspelled variable into a confusing 401
+        ("https://env.example", "", "", {}, "https://env.example", ""),
+        # trailing slashes are trimmed on the env path too, or every
+        # request would carry a doubled separator
+        ("https://env.example/", "", "", {}, "https://env.example", ""),
+    ],
+)
+def test_env_fallback_precedence(
+    monkeypatch, env_base, env_key, arg_base, kwargs, want_base, want_key
+):
+    monkeypatch.setenv(luxsdk.ENV_BASE_URL, env_base)
+    monkeypatch.setenv(luxsdk.ENV_API_KEY, env_key)
+    c = luxsdk.Client(arg_base, **kwargs)
+    assert c._base == want_base
+    assert c._api_key == want_key
+
+
+# A token_source is a credential, so the env key must not be read at
+# all; otherwise a stale export would shadow a live token provider.
+def test_token_source_suppresses_env_key(monkeypatch):
+    monkeypatch.setenv(luxsdk.ENV_BASE_URL, "")
+    monkeypatch.setenv(luxsdk.ENV_API_KEY, "lux_from_env")
+    c = luxsdk.Client(token_source=lambda: "live")
+    assert c._api_key == ""
+    assert c._base == luxsdk.DEFAULT_BASE_URL

@@ -25,6 +25,23 @@ res = c.generate(
 print(res.blocks[0]["text"], res.usage)
 ```
 
+### Configure from the environment
+
+Both connection values fall back to `LUX_BASE_URL` and `LUX_API_KEY`
+when omitted, so a configured process can construct with no arguments:
+
+```sh
+eval "$(latere lux env --compat lux)"   # exports both, using your login
+```
+
+```python
+c = luxsdk.Client()
+```
+
+Explicit arguments always win: the environment only fills what you left
+unset, so exporting `LUX_BASE_URL` can never redirect a client that
+passed its own.
+
 ## Streaming
 
 ```python

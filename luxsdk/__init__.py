@@ -18,6 +18,7 @@ with the wire's snake_case keys go in, dicts come out.
 from __future__ import annotations
 
 import json
+import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass, field
@@ -32,6 +33,9 @@ __all__ = [
     "Stream",
     "user_text",
     "assistant_text",
+    "ENV_BASE_URL",
+    "ENV_API_KEY",
+    "DEFAULT_BASE_URL",
 ]
 
 _GENERATE_PATH = "/lux/v1/generate"
@@ -39,6 +43,17 @@ _COUNT_TOKENS_PATH = "/lux/v1/count_tokens"
 _LOSS_HEADER = "X-Lux-Compat-Loss"
 _ESTIMATED_HEADER = "X-Lux-Compat-Estimated"
 _COST_TAG_HEADER = "Lux-Cost-Tag"
+
+#: Gateway base, e.g. ``https://lux.latere.ai``. Deliberately not
+#: ``LUX_API_URL``: that is the ``latere`` CLI's own target, and one
+#: variable steering both would let ``eval "$(latere lux env --compat
+#: lux)"`` silently retarget the CLI from a subshell.
+ENV_BASE_URL = "LUX_BASE_URL"
+#: Carries exactly what ``Authorization: Bearer`` carries: a ``lux_*``
+#: virtual key, or a Latere Auth identity/actor token.
+ENV_API_KEY = "LUX_API_KEY"
+#: Used when neither an explicit base URL nor :data:`ENV_BASE_URL` is set.
+DEFAULT_BASE_URL = "https://lux.latere.ai"
 
 
 def _format_cost_tags(tags: "dict[str, str] | str | None") -> str:
@@ -202,17 +217,32 @@ class Client:
     ``cost_tags`` attributes every call's cost to named dimensions
     within the caller's own spend (e.g. ``{"tenant": "acme"}``); a
     per-call ``cost_tags`` overrides this default.
+
+    Both connection values fall back to the environment when omitted, so
+    a process configured by ``eval "$(latere lux env --compat lux)"``
+    needs neither::
+
+        c = luxsdk.Client()  # LUX_BASE_URL + LUX_API_KEY
+
+    Explicit arguments always win: the environment fills only what the
+    caller left unset, so setting ``LUX_BASE_URL`` in a shell can never
+    redirect a program that passed its own. An omitted credential stays
+    empty rather than defaulting to unauthenticated, so a misspelled
+    variable fails at the gateway instead of becoming an anonymous call.
     """
 
     def __init__(
         self,
-        base_url: str,
+        base_url: str = "",
         *,
         api_key: str = "",
         token_source: Callable[[], str] | None = None,
         cost_tags: "dict[str, str] | str | None" = None,
         opener: Any = None,
     ):
+        base_url = base_url or os.environ.get(ENV_BASE_URL, "") or DEFAULT_BASE_URL
+        if not api_key and token_source is None:
+            api_key = os.environ.get(ENV_API_KEY, "")
         self._base = base_url.rstrip("/")
         self._api_key = api_key
         self._token_source = token_source
