@@ -89,6 +89,20 @@ def assistant_text(text: str) -> dict[str, Any]:
     return {"role": "assistant", "blocks": [{"type": "text", "text": text}]}
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Refuses every redirect.
+
+    Returning ``None`` from ``redirect_request`` makes urllib fall
+    through to ``HTTPDefaultErrorHandler``, so the 3xx reaches the
+    caller as an ``HTTPError`` and is decoded like any other non-2xx
+    response. Following it would leak the bearer to another origin and
+    turn the POST into a bodyless GET.
+    """
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
 class Error(Exception):
     """A non-2xx gateway response, decoded from the error envelope."""
 
@@ -229,6 +243,13 @@ class Client:
     redirect a program that passed its own. An omitted credential stays
     empty rather than defaulting to unauthenticated, so a misspelled
     variable fails at the gateway instead of becoming an anonymous call.
+
+    Redirects are not followed: urllib's redirect handler re-sends the
+    ``Authorization`` header to whatever host a 3xx names and rewrites
+    POST to GET, dropping the body. A 3xx is surfaced as an
+    :class:`Error` carrying the status and the ``Location`` instead.
+    This applies to the default opener only; a caller-supplied
+    ``opener`` follows redirects again, an explicit opt-out.
     """
 
     def __init__(
@@ -247,7 +268,7 @@ class Client:
         self._api_key = api_key
         self._token_source = token_source
         self._cost_tags = cost_tags
-        self._opener = opener or urllib.request.build_opener()
+        self._opener = opener or urllib.request.build_opener(_NoRedirect)
 
     def generate(
         self, *, cost_tags: "dict[str, str] | str | None" = None, **request: Any
@@ -334,4 +355,9 @@ def _decode_error(e: urllib.error.HTTPError) -> Error:
             )
     except (json.JSONDecodeError, AttributeError):
         pass
-    return Error(e.code, "", raw.decode("utf-8", "replace").strip())
+    message = raw.decode("utf-8", "replace").strip()
+    # A redirect body is empty; the Location is the whole signal.
+    location = e.headers.get("Location") if e.headers else None
+    if location:
+        message = f"{message} (Location: {location})".lstrip()
+    return Error(e.code, "", message)
