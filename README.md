@@ -42,6 +42,24 @@ Explicit arguments always win: the environment only fills what you left
 unset, so exporting `LUX_BASE_URL` can never redirect a client that
 passed its own.
 
+## Timeouts
+
+`generate` and `count_tokens` give up after 60 seconds by default and
+raise `luxsdk.Error`, so a gateway that stops answering cannot block the
+calling thread forever. Set your own bound on the client, or per call:
+
+```python
+c = luxsdk.Client(timeout=10.0)                                # every unary call
+res = c.generate(timeout=120.0, model="claude-opus-5", ...)    # this call only
+```
+
+`stream` has no bound by default. The same value would apply to each
+socket read, which for a live stream means an inter-frame idle limit: a
+model thinking for longer than the bound would look identical to a dead
+connection. Pass `timeout=` to `stream` to bound the gap anyway; it then
+raises `luxsdk.Error` during iteration. `None` anywhere means wait
+forever.
+
 ## Streaming
 
 ```python

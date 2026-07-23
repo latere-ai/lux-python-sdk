@@ -36,6 +36,7 @@ __all__ = [
     "ENV_BASE_URL",
     "ENV_API_KEY",
     "DEFAULT_BASE_URL",
+    "DEFAULT_TIMEOUT",
 ]
 
 _GENERATE_PATH = "/lux/v1/generate"
@@ -43,6 +44,15 @@ _COUNT_TOKENS_PATH = "/lux/v1/count_tokens"
 _LOSS_HEADER = "X-Lux-Compat-Loss"
 _ESTIMATED_HEADER = "X-Lux-Compat-Estimated"
 _COST_TAG_HEADER = "Lux-Cost-Tag"
+
+#: Distinguishes "argument omitted" from an explicit ``None`` (which means
+#: "no bound"), so a per-call ``timeout=None`` can override the client's.
+_UNSET: Any = object()
+
+#: Applies to :meth:`Client.generate` and :meth:`Client.count_tokens` when
+#: the caller sets none. Streaming keeps no default bound: see
+#: :meth:`Client.stream`.
+DEFAULT_TIMEOUT = 60.0
 
 #: Gateway base, e.g. ``https://lux.latere.ai``. Deliberately not
 #: ``LUX_API_URL``: that is the ``latere`` CLI's own target, and one
@@ -156,15 +166,27 @@ class Stream:
     grammar); iteration ends after ``message_stop``. ``loss`` lists
     request fields the backend dialect could not represent. Close (or
     exhaust) the stream to release the connection; usable as a context
-    manager."""
+    manager.
 
-    def __init__(self, resp: Any, loss: list[str]):
+    ``timeout`` is the bound the socket already carries; the stream keeps
+    it only to name the elapsed bound when an idle gap trips it."""
+
+    def __init__(self, resp: Any, loss: list[str], timeout: float | None = None):
         self._resp = resp
+        self._timeout = timeout
         self.loss = loss
 
     def __iter__(self) -> Iterator[dict[str, Any]]:
         try:
-            for frame in _frames(self._resp):
+            frames = _frames(self._resp)
+            while True:
+                try:
+                    frame = next(frames)
+                except StopIteration:
+                    break
+                except TimeoutError as e:
+                    # An inter-frame gap outran the bound.
+                    raise _timed_out(self._timeout) from e
                 ev = _parse_frame(frame)
                 if ev is not None:
                     yield ev
@@ -250,6 +272,19 @@ class Client:
     :class:`Error` carrying the status and the ``Location`` instead.
     This applies to the default opener only; a caller-supplied
     ``opener`` follows redirects again, an explicit opt-out.
+
+    ``timeout`` bounds each socket operation of a :meth:`generate` or
+    :meth:`count_tokens` call in seconds; ``None`` waits forever.
+    :meth:`stream` is unbounded unless the caller asks otherwise,
+    because for a live stream the same bound becomes an inter-frame idle
+    limit and would kill a healthy stream whenever the model thinks for
+    longer than it. Every method takes a per-call override. Timeouts
+    raise :class:`Error`, not ``TimeoutError``.
+
+    A non-``None`` bound reaches the transport as
+    ``opener.open(req, timeout=...)``, so a caller-supplied ``opener``
+    must accept that keyword; the kwarg is omitted entirely when the
+    resolved bound is ``None``.
     """
 
     def __init__(
@@ -259,6 +294,7 @@ class Client:
         api_key: str = "",
         token_source: Callable[[], str] | None = None,
         cost_tags: "dict[str, str] | str | None" = None,
+        timeout: float | None = DEFAULT_TIMEOUT,
         opener: Any = None,
     ):
         base_url = base_url or os.environ.get(ENV_BASE_URL, "") or DEFAULT_BASE_URL
@@ -268,15 +304,24 @@ class Client:
         self._api_key = api_key
         self._token_source = token_source
         self._cost_tags = cost_tags
+        self._timeout = timeout
         self._opener = opener or urllib.request.build_opener(_NoRedirect)
 
     def generate(
-        self, *, cost_tags: "dict[str, str] | str | None" = None, **request: Any
+        self,
+        *,
+        cost_tags: "dict[str, str] | str | None" = None,
+        timeout: float | None = _UNSET,
+        **request: Any,
     ) -> Result:
-        """Non-streaming call; the stream flag is overridden off."""
-        resp = self._post(_GENERATE_PATH, {**request, "stream": False}, cost_tags)
+        """Non-streaming call; the stream flag is overridden off.
+
+        ``timeout`` overrides the client's bound for this call only.
+        """
+        timeout = self._timeout if timeout is _UNSET else timeout
+        resp = self._post(_GENERATE_PATH, {**request, "stream": False}, cost_tags, timeout)
         with resp:
-            body = json.loads(resp.read())
+            body = _read_json(resp, timeout)
             return Result(
                 id=body.get("id", ""),
                 model=body.get("model", ""),
@@ -288,33 +333,53 @@ class Client:
             )
 
     def count_tokens(
-        self, *, cost_tags: "dict[str, str] | str | None" = None, **request: Any
+        self,
+        *,
+        cost_tags: "dict[str, str] | str | None" = None,
+        timeout: float | None = _UNSET,
+        **request: Any,
     ) -> TokenCount:
-        """Token count without spending output tokens; no spend gates run."""
-        resp = self._post(_COUNT_TOKENS_PATH, {**request, "stream": False}, cost_tags)
+        """Token count without spending output tokens; no spend gates run.
+
+        ``timeout`` overrides the client's bound for this call only.
+        """
+        timeout = self._timeout if timeout is _UNSET else timeout
+        resp = self._post(_COUNT_TOKENS_PATH, {**request, "stream": False}, cost_tags, timeout)
         with resp:
-            body = json.loads(resp.read())
+            body = _read_json(resp, timeout)
             return TokenCount(
                 input_tokens=int(body["input_tokens"]),
                 estimated=resp.headers.get(_ESTIMATED_HEADER) == "true",
             )
 
     def stream(
-        self, *, cost_tags: "dict[str, str] | str | None" = None, **request: Any
+        self,
+        *,
+        cost_tags: "dict[str, str] | str | None" = None,
+        timeout: float | None = None,
+        **request: Any,
     ) -> Stream:
-        """Streaming call; the stream flag is overridden on."""
-        resp = self._post(_GENERATE_PATH, {**request, "stream": True}, cost_tags)
+        """Streaming call; the stream flag is overridden on.
+
+        ``timeout`` defaults to ``None`` rather than the client's bound:
+        it would apply to each socket read, so a gap between frames no
+        longer than the model's think-time would end a healthy stream.
+        Pass a value to bound the idle gap; the gap then raises
+        :class:`Error` during iteration.
+        """
+        resp = self._post(_GENERATE_PATH, {**request, "stream": True}, cost_tags, timeout)
         ctype = resp.headers.get("Content-Type", "")
         if not ctype.startswith("text/event-stream"):
             resp.close()
             raise Error(resp.status, "", f"expected an event stream, got {ctype!r}")
-        return Stream(resp, _parse_loss(resp))
+        return Stream(resp, _parse_loss(resp), timeout)
 
     def _post(
         self,
         path: str,
         payload: dict[str, Any],
         cost_tags: "dict[str, str] | str | None" = None,
+        timeout: float | None = None,
     ) -> Any:
         headers = {"Content-Type": "application/json"}
         bearer = self._token_source() if self._token_source else self._api_key
@@ -331,9 +396,40 @@ class Client:
             method="POST",
         )
         try:
-            return self._opener.open(req)
+            # Omitted, not passed as None, when unbounded: that keeps the
+            # call identical to the pre-timeout one for openers that take
+            # no such keyword, and leaves socket.setdefaulttimeout in force.
+            if timeout is None:
+                return self._opener.open(req)
+            return self._opener.open(req, timeout=timeout)
         except urllib.error.HTTPError as e:
             raise _decode_error(e) from None
+        except TimeoutError as e:
+            # Waiting for the response line/headers.
+            raise _timed_out(timeout) from e
+        except urllib.error.URLError as e:
+            # Connecting or sending; urllib wraps the socket error.
+            if isinstance(e.reason, TimeoutError):
+                raise _timed_out(timeout) from e
+            raise
+
+
+def _timed_out(timeout: float | None) -> Error:
+    """The client's own giving-up, shaped like a gateway error so callers
+    catch one exception type. Status 0: no response ever carried one."""
+    bound = f" after {timeout}s" if timeout is not None else ""
+    return Error(0, "timeout", f"request timed out{bound}")
+
+
+def _read_json(resp: Any, timeout: float | None) -> dict[str, Any]:
+    """Reads a response body. The socket bound outlives the opener call
+    and applies here too, so a body that stalls behind fast headers times
+    out on the read rather than on the connect."""
+    try:
+        raw = resp.read()
+    except TimeoutError as e:
+        raise _timed_out(timeout) from e
+    return json.loads(raw)
 
 
 def _parse_loss(resp: Any) -> list[str]:
