@@ -10,8 +10,12 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    # A job-level block replaces the workflow-level set entirely, so both
+    # scopes must be named here: id-token for PyPI OIDC, contents for the
+    # tag-anchored GitHub Release.
     permissions:
       id-token: write
+      contents: write
     steps:
       - uses: actions/checkout@v4
       # A tag must publish exactly the version it names; a stale
